@@ -1,12 +1,15 @@
 ---
 title: "Simulate and fit closed and open spatial capture-recapture models"
-author: "Olivier Gimenez"
 date: "20/09/2020"
 output: html_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, dpi = 300, message = FALSE, warning = FALSE, cache = TRUE)
+knitr::opts_chunk$set(echo = TRUE, 
+                      dpi = 300, 
+                      message = FALSE, 
+                      warning = FALSE, 
+                      cache = TRUE)
 library(tidyverse)
 theme_set(theme_light())
 ```
@@ -200,7 +203,7 @@ Compile in `C++`.
 Cmcmc <- compileNimble(Rmcmc, project = Cmodel)
 ```
 
-Run compiled model (do not run th uncompiled model with `runMCMC(Rmcmc,100)`).
+Run compiled model (do not run the uncompiled model with `runMCMC(Rmcmc,100)`).
 ```{r}
 samples <- runMCMC(Cmcmc,100)
 ```
@@ -226,7 +229,7 @@ samples <- rbind(samplesList[[1]],
 str(samples)
 ```
 
-Calculate ESS effective sample size (should be at least a thousand). Efficiency measures the tradeoff between ESS and computation time (the ratio). For example, an efficiency of 2 means that for every second you run the algorithm, it produces 2 independent samples. 
+Calculate ESS effective sample size. 
 ```{r}
 library(coda)
 apply(samples, 2, effectiveSize)
@@ -392,32 +395,62 @@ code <- nimbleCode({
   phi ~ dunif(0, 1) # survival
   for(t in 1:T){ # T = 10 years
     gamma[t] ~ dunif(0, 1) # recruitment
-    N[t] <- sum(z[1:M, t]) # N per year
-    Rc[t] <- sum(R[1:M, t]) # number recruited
-    for (i in 1:M){ # loop over M individuals (includes the augmented data)
-      for(j in 1:J) { # loop over all traps of that year
-        D2[t,i,j] <- pow(SX[i] - trapmat[j,1], 2) + pow(SY[i] - trapmat[j,2], 2)
-        g[t,i,j] <- lam0 * exp(-D2[t,i,j] / (2 * sigma2))
-        pmean[t,i,j] <- 1- exp(-g[t,i,j])
-        tmp[t,i,j] <- z[i,t] * pmean[t,i,j]
-        y[t,i,j] ~ dbin(tmp[t,i,j],K) # K is the number of days a trap was operational
-      }
-    }
   }
-  for (i in 1:M){
+  for (i in 1:M){ # loop over M individuals (includes the augmented data)
+    ncaps[i] <- sum(z[i,1:T])
+    alive[i] <- 1 - equals(ncaps[i],0)
     z[i,1] ~ dbin(gamma[1], 1)
-    a[i,1] <- (1 - z[i,1])
-    R[i,1] <- z[i,1] # calculate recruits
     SX[i] ~ dunif(xl, xu) # set priors for the X and Y coordinates of each individual
     SY[i] ~ dunif(yl, yu)
-    for(t in 2:T){
-      a1[i,t] <- sum(z[i, 1:t]) # have you ever been alive (0 = no, >1 = yes)
-      a[i,t] <- 1 - step(a1[i,t] - 1) # use the step function to make a1 binary
-      mu[i,t] <- (phi * z[i,t-1]) + (gamma[t] * a[i,t-1])
-      z[i,t] ~ dbern(mu[i,t])
-      R[i,t] <- z[i,t] * a[i,t-1]
+    for(j in 1:J) { # loop over all traps of that year
+      D2[i,j] <- pow(SX[i] - trapmat[j,1], 2) + pow(SY[i] - trapmat[j,2], 2)
+      g[i,j] <- lam0 * exp(-D2[i,j] / (2 * sigma2))
+      pmean[i,j] <- 1 - exp(-g[i,j])
+      for (t in 1:T){
+      tmp[t,i,j] <- z[i,t] * pmean[i,j]
+      y[t,i,j] ~ dbin(tmp[t,i,j], K) # K is the number of days a trap was operational
+      }
     }
+  a[i,1] <- (1 - z[i,1])
+  a[i,2] <- (1-z[i,1]) * (1-z[i,2]) 
+  a[i,3] <- (1-z[i,1]) * (1-z[i,2]) * (1-z[i,3]) 
+  a[i,4] <- (1-z[i,1]) * (1-z[i,2]) * (1-z[i,3]) * (1-z[i,4]) 
+
+  gammatmp[i,2] <- gamma[2] * a[i,1]
+  mu[i,2] <- (phi * z[i,1]) + gammatmp[i,2]
+  z[i,2] ~ dbern(mu[i,2])
+  
+  gammatmp[i,3] <- gamma[3] * a[i,2]
+  mu[i,3] <- (phi * z[i,2]) + gammatmp[i,3]
+  z[i,3] ~ dbern(mu[i,3])
+
+  gammatmp[i,4] <- gamma[4] * a[i,3]
+  mu[i,4] <- (phi * z[i,3]) + gammatmp[i,4]
+  z[i,4] ~ dbern(mu[i,4])
+
+  gammatmp[i,5] <- gamma[5] * a[i,4]
+  mu[i,5] <- (phi * z[i,4]) + gammatmp[i,5]
+  z[i,5] ~ dbern(mu[i,5])
+
+  R[i,1] <- z[i,1]
+  R[i,2] <- (1 - z[i,1]) * z[i,2]
+  R[i,3] <- (1 - z[i,1]) * (1 - z[i,2]) * z[i,3]
+  R[i,4] <- (1 - z[i,1]) * (1 - z[i,2]) * (1 - z[i,3]) * z[i,4]
+  R[i,5] <- (1 - z[i,1]) * (1 - z[i,2]) * (1 - z[i,3]) * (1 - z[i,4]) * z[i,5]
   }
+  
+  N1 <- sum(z[1:M,1])
+  N2 <- sum(z[1:M,2])
+  N3 <- sum(z[1:M,3])
+  N4 <- sum(z[1:M,4])
+  N5 <- sum(z[1:M,5])
+  Nalive <- sum(alive[1:M])
+  
+  R1 <- sum(R[1:M,1])
+  R2 <- sum(R[1:M,2])
+  R3 <- sum(R[1:M,3])
+  R4 <- sum(R[1:M,4])
+  R5 <- sum(R[1:M,5])
 })
 ```
 
@@ -455,10 +488,10 @@ zinit[1:ntot,] <- 1
 
 constants <- list(M = Mc, 
                   K = K, 
-                  J = J)
+                  J = J,
+                  T = T)
 
 data <- list(y = dataugTMJ, 
-             T = T, 
              xl = xl, 
              xu = xu, 
              yl = yl, 
@@ -472,8 +505,6 @@ inits <- list(phi = runif(1),
        lam0 = runif(1), 
        SY = as.vector(Sin(T = T, M = Mc, xl = xl, xu = xu, yl = yl, yu = yu, ntot = ntot)[[2]]),
        SX = as.vector(Sin(T = T, M = Mc, xl = xl, xu = xu, yl = yl, yu = yu, ntot = ntot)[[1]]))
-
-params <- c("phi", "sigma", "lam0", "N", "Rc", "gamma")
 ```
 
 
@@ -485,7 +516,7 @@ Rmodel <- nimbleModel(code = code,
                       inits = inits)
 ```
 
-Check whether the model is fully initialized. If you failed at providing initial values for some parameters (e.g. $\psi$), you'll get NAs.
+Check whether the model is fully initialized.
 ```{r}
 Rmodel$calculate()
 ```
@@ -500,16 +531,12 @@ The `R` and `C` models are exactly the same versions of the model.
 calculate(Cmodel)
 ```
 
-You can simulate from prior.
-```{r}
-Cmodel$simulate('lam0')
-calculate(Cmodel)
-```
-
 Specify MCMC.
 ```{r}
 conf <- configureMCMC(Rmodel,
-                      monitors = c("N", "lam0", "psi", "sigma"))
+                      monitors = c("N1", "N2", "N3", "N4", "N5",
+                                   "R1", "R2", "R3", "R4", "R5",
+                                   "lam0", "phi", "sigma", "gamma"))
 ```
 
 Build an executable MCMC.
@@ -522,7 +549,7 @@ Compile in `C++`.
 Cmcmc <- compileNimble(Rmcmc, project = Cmodel)
 ```
 
-Run compiled model (do not run th uncompiled model with `runMCMC(Rmcmc,100)`).
+Run compiled model (do not run the uncompiled model with `runMCMC(Rmcmc,100)`).
 ```{r}
 samples <- runMCMC(Cmcmc,100)
 ```
@@ -548,7 +575,7 @@ samples <- rbind(samplesList[[1]],
 str(samples)
 ```
 
-Calculate ESS effective sample size (should be at least a thousand). Efficiency measures the tradeoff between ESS and computation time (the ratio). For example, an efficiency of 2 means that for every second you run the algorithm, it produces 2 independent samples. 
+Calculate ESS effective sample size.
 ```{r}
 library(coda)
 apply(samples, 2, effectiveSize)
@@ -558,21 +585,45 @@ Produce trace an density plots.
 ```{r}
 library(basicMCMCplots)
 chainsPlot(samplesList,
-           var = c("N", "sigma", "lam0"))
+           var = c("N1", "N2", "N3", "N4", "N5"))
 ```
 
-Display summary stats. Compare to the values used to simulate data, in particuler $N = 50$, $\sigma = 5$ and $\lambda_0 = 0.4$.
 ```{r}
-summary(samples)
+chainsPlot(samplesList,
+           var = c("R1", "R2", "R3", "R4", "R5"))
+```
+
+```{r}
+chainsPlot(samplesList,
+           var = c("sigma", "phi", "lam0"))
 ```
 
 
+Display summary stats. Compare to the values used to simulate data, in particuler $N = 40$, $\sigma = 0.5$, $\phi = 0.75$ and $\lambda_0 = 0.5$.
+```{r}
+samplesSummary(samples)
+```
+
+Plot estimated pop size. 
+```{r}
+res <- samplesSummary(samples)
+res <- cbind(param = rownames(res), res)
+res %>%
+  as_tibble() %>%
+  janitor::clean_names() %>%
+  mutate(mean = round(as.numeric(mean)),
+         low = round(as.numeric(x95_percent_ci_low)),
+         up = round(as.numeric(x95_percent_ci_upp))) %>%
+  filter(str_detect(param, "N")) %>%
+  mutate(year = row_number()) %>%
+  ggplot() + 
+  aes(x = year, y = mean) + 
+  geom_point() + 
+  geom_errorbar(aes(ymin = low, ymax = up), width=.1)
+```
 
 
-
-In paper, authors used three parallel chains with a 500 iteration burn‐in phase and 10000‐70000 posterior samples, thinned by 2.
-
-## To do list
+## To-do list
 
 * Add formal description of the models.
 
