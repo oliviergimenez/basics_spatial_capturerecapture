@@ -1,1 +1,1 @@
-# basics_spatial_capturerecapture
+# Spatial capture-recapture basics
