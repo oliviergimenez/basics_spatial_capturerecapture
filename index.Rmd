@@ -1,0 +1,586 @@
+---
+title: "Simulate and fit closed and open spatial capture-recapture models"
+author: "Olivier Gimenez"
+date: "20/09/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, dpi = 300, message = FALSE, warning = FALSE, cache = TRUE)
+library(tidyverse)
+theme_set(theme_light())
+```
+
+## Motivation
+
+I need to have in one place some code to simulate data and fit spatial capture-recapture models, for both closed and open populations. 
+
+The reference book for spatial capture-capture (SCR) models is [Spatial Capture-Recapture](https://www.elsevier.com/books/spatial-capture-recapture/royle/978-0-12-405939-9) by Royle, Chandler, Sollmann and Gardner. Andy Royle has nice slides for [an introduction to SCR models](https://docs.google.com/viewer?a=v&pid=sites&srcid=ZGVmYXVsdGRvbWFpbnxzcGF0aWFsY2FwdHVyZXJlY2FwdHVyZXxneDo3MzMwZjQyYjA2M2MwMmNj), and a [video](https://www.youtube.com/watch?v=4HKFimATq9E). 
+
+We will go the Bayesian way. Richard Chandler provides nice slides for Bayesian inference in [closed population SCR models](https://docs.google.com/viewer?a=v&pid=sites&srcid=ZGVmYXVsdGRvbWFpbnxzcGF0aWFsY2FwdHVyZXJlY2FwdHVyZXxneDozYzkyMjQwYTA3ZjYzNDFm), and [open population SCR models](https://docs.google.com/viewer?a=v&pid=sites&srcid=ZGVmYXVsdGRvbWFpbnxzcGF0aWFsY2FwdHVyZXJlY2FwdHVyZXxneDpkYWIyZGU3OTRjYTkwYzA).
+
+To fit SCR models, we will use [`Nimble`](https://r-nimble.org/) developed by [Perry de Valpine and colleagues](https://r-nimble.org/more/about-us). We might implement [a few tricks by Daniel Turek](https://www.biorxiv.org/content/10.1101/2020.05.07.081182v1) to improve and reach convergence faster.
+
+Load `Nimble`.
+```{r}
+library(nimble)
+```
+
+## Closed population spatial capture-recapture models
+
+### Description
+
+We use some code shared by Jose Jimenez on the [SCR Google group](https://groups.google.com/g/spatialcapturerecapture) and adapted by Perry de Valpine. A formal description of the model we consider is given in the references given above.
+
+### Simulations
+
+The traps.
+```{r}
+tr <- seq(15, 85, length = 10)
+traps <- data.frame(X = rep(tr, each = length(tr)),
+                    Y = rep(tr, times = length(tr))) # 100 coord. traps
+```
+
+Visualize.
+```{r}
+viz_traps <- traps %>% 
+  ggplot(aes(x = X, y = Y)) +
+  geom_point(pch = 3) + 
+  xlim(0, 100) +
+  ylim(0, 100)
+viz_traps
+```
+
+Generate population.
+```{r}
+set.seed(10)
+xlim <- c(0, 100)
+ylim <- c(0, 100) # area 100 * 100 = 1e4
+A <- (xlim[2] - xlim[1]) * (ylim[2] - ylim[1])/10000
+A
+mu <- 50 # density
+N <- rpois(1, mu*A) # generate population
+N 
+```
+
+Generate activity centers.
+```{r}
+s <- data.frame(s.x = runif(N, xlim[1], xlim[2]), 
+                s.y = runif(N, ylim[1], ylim[2]))
+```
+
+Visualize.
+```{r}
+viz_traps_ac <- viz_traps + 
+  geom_point(data = s, aes(x = s.x, y = s.y), pch = 16, color = "red")
+viz_traps_ac
+```
+
+Generate detections.
+```{r}
+sigma <- 5
+lambda0 <- 0.4
+J <- nrow(traps) # nb of traps
+K <- 5 # nb capture occasions
+yy <- array(NA, c(N, J, K))
+for(j in 1:J) {
+  dist <- sqrt((traps$X[j] - s$s.x)^2 + (traps$Y[j] - s$s.y)^2)
+  lambda <- lambda0 * exp(-dist^2 / (2 * sigma^2))
+  for(k in 1:K) {
+    yy[,j,k] <- rpois(N, lambda)
+  }
+}
+n <- apply(yy, c(2,3), sum)
+```
+
+
+Plot detections.
+```{r}
+tot <- apply(n, 1, sum)
+dat <- data.frame(traps, tot = tot)
+
+viz_traps_ac +
+  geom_point(data = dat, aes(x = X, y = Y, size = tot), alpha = 0.3) +
+  scale_size(range = c(0, 20)) +
+  labs(x = "",
+       y = "",
+       size = "# detections")
+```
+
+
+### Model fitting
+
+Define the model.
+```{r}
+code <- nimbleCode({
+  sigma ~ dunif(0, 10)
+  lam0 ~ dunif(0, 5)
+  psi ~ dbeta(1, 1)
+  for(i in 1:M) {
+    z[i] ~ dbern(psi)
+    s[i,1] ~ dunif(xlim[1], xlim[2])
+    s[i,2] ~ dunif(ylim[1], ylim[2])
+    dist[i,1:J] <- (s[i,1] - X[1:J,1])^2 + (s[i,2] - X[1:J,2])^2
+    lam[i,1:J] <- exp(-dist[i,1:J] / (2 * sigma^2)) * z[i]
+  }
+  for(j in 1:J){
+    bigLambda[j] <- lam0 * sum(lam[1:M,j])
+    for(k in 1:K) {
+      n[j,k] ~ dpois(bigLambda[j])
+    }
+    }
+  N <- sum(z[1:M])
+})
+```
+
+Define constants, data and inits.
+```{r}
+M <- 200
+constants <- list(M = M, 
+                  K = K, 
+                  J = J)
+n1 <- apply(n, 1, sum)
+data <- list(n = n, 
+             X = traps, 
+             xlim = xlim, 
+             ylim = ylim)
+s <- cbind(runif(M, xlim[1], xlim[2]), 
+           runif(M, ylim[1], ylim[2]))
+z <- rep(1, M)
+inits <- list(sigma = 0.5, 
+              lam0 = 0.1, 
+              s = s, 
+              z = z,
+              psi = 0.5)
+```
+
+
+Build `R` model (not compiled yet).
+```{r}
+Rmodel <- nimbleModel(code = code, 
+                      constants = constants, 
+                      data = data, 
+                      inits = inits)
+```
+
+Check whether the model is fully initialized. If you failed at providing initial values for some parameters (e.g. $\psi$), you'll get NAs.
+```{r}
+Rmodel$calculate()
+```
+
+Now compile the model in `C++`.
+```{r}
+Cmodel <- compileNimble(Rmodel)
+```
+
+The `R` and `C` models are exactly the same versions of the model.
+```{r}
+calculate(Cmodel)
+```
+
+You can simulate from prior.
+```{r}
+Cmodel$simulate('lam0')
+calculate(Cmodel)
+```
+
+Specify MCMC.
+```{r}
+conf <- configureMCMC(Rmodel,
+                      monitors = c("N", "lam0", "psi", "sigma"))
+```
+
+Build an executable MCMC.
+```{r}
+Rmcmc <- buildMCMC(conf)
+```
+
+Compile in `C++`. 
+```{r}
+Cmcmc <- compileNimble(Rmcmc, project = Cmodel)
+```
+
+Run compiled model (do not run th uncompiled model with `runMCMC(Rmcmc,100)`).
+```{r}
+samples <- runMCMC(Cmcmc,100)
+```
+
+Explore.
+```{r}
+dim(samples)
+colnames(samples)
+samplesSummary(samples)
+```
+
+Run compiled model. Takes 10-15 minutes on my machine.
+```{r}
+samplesList <- runMCMC(Cmcmc,
+                   niter = 10000,
+                   nburnin = 5000,
+                   nchains = 2)
+samples <- rbind(samplesList[[1]],
+                 samplesList[[2]])
+```
+
+```{r}
+str(samples)
+```
+
+Calculate ESS effective sample size (should be at least a thousand). Efficiency measures the tradeoff between ESS and computation time (the ratio). For example, an efficiency of 2 means that for every second you run the algorithm, it produces 2 independent samples. 
+```{r}
+library(coda)
+apply(samples, 2, effectiveSize)
+```
+
+Produce trace an density plots. 
+```{r}
+library(basicMCMCplots)
+chainsPlot(samplesList,
+           var = c("N", "sigma", "lam0"))
+```
+
+Display summary stats. Compare to the values used to simulate data, in particuler $N = 50$, $\sigma = 5$ and $\lambda_0 = 0.4$.
+```{r}
+summary(samples)
+```
+
+## Open population spatial capture-recapture models
+
+### Description
+
+We use some code shared by Beth Gardner and colleagues in their paper [State space and movement specification in open population spatial capture–recapture models](https://onlinelibrary.wiley.com/doi/full/10.1002/ece3.4509). A formal description of the model we consider is given in the paper. We consider a model with constant activity centers.
+
+### Simulations
+
+Function to calculate the distance between multiple points.
+```{r}
+e2dist <- function(x, y){ 
+  i <- sort(rep(1:nrow(y), nrow(x)))
+  dvec <- sqrt((x[, 1] - y[i, 1])^2 + (x[, 2] - y[i, 2])^2)
+  matrix(dvec, nrow = nrow(x), ncol = nrow(y), byrow = F)
+}
+```
+
+
+```{r}
+simJS.fn <- function(N, phi0, lam0, M, T, grid, xl, xu, yl, yu, sigma, K){ # M is total ever alive
+  ntraps <- dim(grid)[1]
+  nreps <- K
+  lam0 <- rep(lam0, T)
+  phi<- rep(phi0, T)
+  pmat <- lam <- list()
+  gamma <- NULL
+  gamma[1] <- N/M
+  sx <- runif(M, xl, xu)
+  sy <- runif(M, yl, yu)
+  z <- r <- al <- matrix(0, nrow = M, ncol = T)
+  r[,1] <- rbinom(M, 1, gamma[1])
+  z[,1] <- r[,1]
+  for (t in 2:T){
+    # survival
+    surv <- rbinom(M, 1, z[,t-1] * phi[t])
+    # recruitment
+    al[,t] <- apply(matrix(z[,1:(t-1)], nrow = M, byrow = FALSE), 1, sum) > 0
+    idx <- 1 - as.numeric(al[,t])
+    gamma[t] <- (N - sum(surv)) / sum(idx)
+    if (gamma[t] < 0) gamma[t] <- 0
+    r[,t] <- rbinom(M, idx, gamma[t])
+    z[,t] <- surv + r[,t]
+  }
+  S <- cbind(sx, sy)
+  dmat <- e2dist(S, grid)
+  psi<- exp(-(1 / (2 * sigma * sigma)) * dmat * dmat)
+  for (t in 1:T){
+    lam[[t]] <- lam0[t] * psi
+    pmat[[t]] <- 1 - exp(-lam[[t]])
+  }
+  y <- array(0, dim = c(M, ntraps, T))
+  for (t in 1:T){
+    yfull <- array(0, dim = c(M, ntraps, K))
+    for (i in 1:M){
+      for (k in 1:K){
+        yfull[i, 1:ntraps, k] <- rbinom(ntraps, 1, pmat[[t]][i,] * z[i,t])
+      }
+    }
+    y[, 1:ntraps, t] <- apply(yfull, 1:2, sum)
+  }
+  ycapt <- y[which(rowSums(y[,,])>0), , ]
+  list(y = ycapt, 
+       z = z,
+       r = r,
+       gamma = gamma,
+       N = apply(z, 2, sum),
+       R = apply(r, 2, sum), 
+       SX = sx, 
+       SY = sy)
+}
+```
+
+Set up the basic trap array in a 7x7 grid.
+```{r}
+gridx <- seq(-3, 3, 1)
+grid <- as.matrix(expand.grid(gridx, gridx))
+J <- dim(grid)[1]
+```
+
+Set the upper and lower x and y coordinates for the state space.
+```{r}
+xl <- -5
+yl <- -5
+xu <- 5
+yu <- 5
+```
+
+Parameters specification.
+```{r}
+T <- K <- 5 # number of years / seasons
+sigma <- 0.5
+lam0 <- 0.5
+N <- 40
+M <- 150
+phi0 <- 0.75
+tau <- 0.5
+Mc <- 150 # upper M for data augmentation
+```
+
+Simulate data.
+```{r}
+simdat <- simJS.fn(N = N,
+                   phi0 = phi0,
+                   lam0 = lam0,
+                   M = Mc, 
+                   T = T, 
+                   grid = grid, 
+                   xl = xl, 
+                   xu = xu, 
+                   yl = yl, 
+                   yu = yu, 
+                   sigma = sigma, 
+                   K = K)
+str(simdat)
+```
+
+Visualise traps.
+```{r}
+viz_traps <- grid %>% 
+  as_tibble() %>%
+  ggplot(aes(x = Var1, y = Var2)) +
+  geom_point(pch = 3) +
+  xlim(-5, 5) +
+  ylim(-5, 5)
+viz_traps
+```
+
+Add activity centers.
+```{r}
+viz_traps_ac <- viz_traps + 
+  geom_point(data = data.frame(s.x = simdat$SX, s.y = simdat$SY), 
+             aes(x = s.x, y = s.y), pch = 16, color = "red")
+viz_traps_ac
+```
+
+
+### Model fitting
+
+Define the model.
+```{r}
+code <- nimbleCode({
+  # set priors for sigma2, lam0 (encounter rate), gamma, and phi
+  sigma ~ dunif(0, 10)
+  sigma2 <- sigma * sigma
+  lam0 ~ dunif(0, 5)
+  phi ~ dunif(0, 1) # survival
+  for(t in 1:T){ # T = 10 years
+    gamma[t] ~ dunif(0, 1) # recruitment
+    N[t] <- sum(z[1:M, t]) # N per year
+    Rc[t] <- sum(R[1:M, t]) # number recruited
+    for (i in 1:M){ # loop over M individuals (includes the augmented data)
+      for(j in 1:J) { # loop over all traps of that year
+        D2[t,i,j] <- pow(SX[i] - trapmat[j,1], 2) + pow(SY[i] - trapmat[j,2], 2)
+        g[t,i,j] <- lam0 * exp(-D2[t,i,j] / (2 * sigma2))
+        pmean[t,i,j] <- 1- exp(-g[t,i,j])
+        tmp[t,i,j] <- z[i,t] * pmean[t,i,j]
+        y[t,i,j] ~ dbin(tmp[t,i,j],K) # K is the number of days a trap was operational
+      }
+    }
+  }
+  for (i in 1:M){
+    z[i,1] ~ dbin(gamma[1], 1)
+    a[i,1] <- (1 - z[i,1])
+    R[i,1] <- z[i,1] # calculate recruits
+    SX[i] ~ dunif(xl, xu) # set priors for the X and Y coordinates of each individual
+    SY[i] ~ dunif(yl, yu)
+    for(t in 2:T){
+      a1[i,t] <- sum(z[i, 1:t]) # have you ever been alive (0 = no, >1 = yes)
+      a[i,t] <- 1 - step(a1[i,t] - 1) # use the step function to make a1 binary
+      mu[i,t] <- (phi * z[i,t-1]) + (gamma[t] * a[i,t-1])
+      z[i,t] ~ dbern(mu[i,t])
+      R[i,t] <- z[i,t] * a[i,t-1]
+    }
+  }
+})
+```
+
+
+Function to create initial coordinates of activity centers for each individual.
+```{r}
+Sin <- function(T = T, M = M, xl = xl, xu = xu, yl = yl, yu = yu, ntot = ntot){
+  SX <- SY <- matrix(NA, nrow = M, ncol = 1)
+  for(i in 1:M){
+    for (t in 1:T){
+      SX[i] <- runif(1, xl, xu)
+      SY[i] <- runif(1, yl, yu)
+      traps <- which(dataug[i,,t] > 0)
+      if(length(traps) > 0){
+        SX[i] <- mean(grid[traps,1])
+        SY[i] <- mean(grid[traps,2])
+      }
+    }
+  }
+return(list(SX, SY))
+}
+```
+
+
+Data, inits and parameters to monitored. 
+```{r}
+ntot <- dim(simdat$y)[1] # total ever observed in this simulated dataset
+# add Mc-ntot zero encounter histories (data augmentation)
+dataug <- array(0, dim = c(Mc, J, T))
+dataug[1:ntot, , ] <- simdat$y
+dataugTMJ <- aperm(dataug, c(3,1,2))
+# create intial values for z state
+zinit <- matrix(0,nrow = Mc, ncol = T)
+zinit[1:ntot,] <- 1
+
+constants <- list(M = Mc, 
+                  K = K, 
+                  J = J)
+
+data <- list(y = dataugTMJ, 
+             T = T, 
+             xl = xl, 
+             xu = xu, 
+             yl = yl, 
+             yu = yu, 
+             trapmat = as.matrix(grid))
+
+inits <- list(phi = runif(1), 
+       gamma = runif(T, 0, 1),
+       sigma = runif(1, 1, 2),
+       z = zinit,
+       lam0 = runif(1), 
+       SY = as.vector(Sin(T = T, M = Mc, xl = xl, xu = xu, yl = yl, yu = yu, ntot = ntot)[[2]]),
+       SX = as.vector(Sin(T = T, M = Mc, xl = xl, xu = xu, yl = yl, yu = yu, ntot = ntot)[[1]]))
+
+params <- c("phi", "sigma", "lam0", "N", "Rc", "gamma")
+```
+
+
+Build `R` model (not compiled yet).
+```{r}
+Rmodel <- nimbleModel(code = code, 
+                      constants = constants, 
+                      data = data, 
+                      inits = inits)
+```
+
+Check whether the model is fully initialized. If you failed at providing initial values for some parameters (e.g. $\psi$), you'll get NAs.
+```{r}
+Rmodel$calculate()
+```
+
+Now compile the model in `C++`.
+```{r}
+Cmodel <- compileNimble(Rmodel)
+```
+
+The `R` and `C` models are exactly the same versions of the model.
+```{r}
+calculate(Cmodel)
+```
+
+You can simulate from prior.
+```{r}
+Cmodel$simulate('lam0')
+calculate(Cmodel)
+```
+
+Specify MCMC.
+```{r}
+conf <- configureMCMC(Rmodel,
+                      monitors = c("N", "lam0", "psi", "sigma"))
+```
+
+Build an executable MCMC.
+```{r}
+Rmcmc <- buildMCMC(conf)
+```
+
+Compile in `C++`. 
+```{r}
+Cmcmc <- compileNimble(Rmcmc, project = Cmodel)
+```
+
+Run compiled model (do not run th uncompiled model with `runMCMC(Rmcmc,100)`).
+```{r}
+samples <- runMCMC(Cmcmc,100)
+```
+
+Explore.
+```{r}
+dim(samples)
+colnames(samples)
+samplesSummary(samples)
+```
+
+Run compiled model. Takes 10-15 minutes on my machine.
+```{r}
+samplesList <- runMCMC(Cmcmc,
+                   niter = 10000,
+                   nburnin = 5000,
+                   nchains = 2)
+samples <- rbind(samplesList[[1]],
+                 samplesList[[2]])
+```
+
+```{r}
+str(samples)
+```
+
+Calculate ESS effective sample size (should be at least a thousand). Efficiency measures the tradeoff between ESS and computation time (the ratio). For example, an efficiency of 2 means that for every second you run the algorithm, it produces 2 independent samples. 
+```{r}
+library(coda)
+apply(samples, 2, effectiveSize)
+```
+
+Produce trace an density plots. 
+```{r}
+library(basicMCMCplots)
+chainsPlot(samplesList,
+           var = c("N", "sigma", "lam0"))
+```
+
+Display summary stats. Compare to the values used to simulate data, in particuler $N = 50$, $\sigma = 5$ and $\lambda_0 = 0.4$.
+```{r}
+summary(samples)
+```
+
+
+
+
+
+In paper, authors used three parallel chains with a 500 iteration burn‐in phase and 10000‐70000 posterior samples, thinned by 2.
+
+## To do list
+
+* Add formal description of the models.
+
+* Add code to plot map of estimated density and activity centers.
+
+* Improve convergence.
+
+* Provide Jags implementation (?).
+
+* Provide secr and oSCR implementation for max likelihood counterpart (?).
+
